@@ -159,7 +159,7 @@ class BERTModel(object):
         input_ids = token_ids + [0] * (self.max_seq_length - len(token_ids))
         return np.array(input_ids)
 
-    def get_masks(self, tokens):
+    def get_token_masks(self, tokens):
         """Mask for padding"""
         if len(tokens) > self.max_seq_length:
             raise IndexError("Token length more than max seq length!")
@@ -178,6 +178,33 @@ class BERTModel(object):
                 current_segment_id = 1
         all_segments = segments + [0] * (self.max_seq_length - len(tokens))
         return np.array(all_segments)
+
+    def get_subj_obj_masks(self, tokens, masks):
+        """Returns indices in ragne(max_seq_length)
+           of [SUBJ] and [OBJ] tokens."""
+        if len(tokens) > self.max_seq_length:
+            raise IndexError("Token length more than max seq length!")
+        subj_tokenized = self.tokenizer.tokenize(masks[0])
+        obj_tokenized = self.tokenizer.tokenize(masks[1])
+
+        subj_mask = np.zeros(shape=(self.max_seq_length,), dtype=int)
+        obj_mask = np.zeros(shape=(self.max_seq_length,), dtype=int)
+
+        def getsubidx(x, y):
+            lx, ly = len(x), len(y)
+            for i in range(lx):
+                if x[i:i+ly] == y:
+                    return i
+
+        subj_start = getsubidx(tokens, subj_tokenized)
+        if subj_start is not None:
+            subj_end = subj_start + len(subj_tokenized)
+            subj_mask[subj_start:subj_end] = 1
+        obj_start = getsubidx(tokens, obj_tokenized)
+        if obj_start is not None:
+            obj_end = obj_start + len(obj_tokenized)
+            obj_mask[obj_start:obj_end] = 1
+        return (subj_mask, obj_mask)
 
     def get_model(self):
         if self.n_classes in [1, 2]:
@@ -217,6 +244,55 @@ class BERTModel(object):
         model.compile(loss=loss, optimizer=optimizer, metrics=self.fit_metrics)
         return model
 
+    def get_seq_model(self):
+        if self.n_classes in [1, 2]:
+            out_activation = "sigmoid"
+            loss = "binary_crossentropy"
+        else:
+            out_activation = "softmax"
+            loss = "categorical_crossentropy"
+
+        inshape = (self.max_seq_length, )
+        input_word_ids = tf.keras.layers.Input(shape=inshape,
+                                               dtype=tf.int32,
+                                               name="input_word_ids")
+        input_mask = tf.keras.layers.Input(shape=inshape,
+                                           dtype=tf.int32,
+                                           name="input_mask")
+        segment_ids = tf.keras.layers.Input(shape=inshape,
+                                            dtype=tf.int32,
+                                            name="segment_ids")
+        bert_inputs = [input_word_ids, input_mask, segment_ids]
+
+        subj_mask = tf.keras.layers.Input(shape=inshape,
+                                          dtype=tf.int32,
+                                          name="subject_mask")
+        obj_mask = tf.keras.layers.Input(shape=inshape,
+                                         dtype=tf.int32,
+                                         name="object_mask")
+        mask_inputs = [subj_mask, obj_mask]
+
+        bert_layer = hub.KerasLayer(self.bert_file,
+                                    trainable=True, name="bert")
+
+        pooled_output, seq_output = bert_layer(bert_inputs)
+        # dense_input = seq_output[:, 0, :]  # [CLS] output
+        subj = tf.boolean_mask(seq_output, subj_mask, axis=0, name="subj_mask")
+        obj = tf.boolean_mask(seq_output, obj_mask, axis=0, name="obj_mask")
+        dense_input = tf.stack([subj, obj], axis=1)
+        drop_layer = tf.keras.layers.Dropout(rate=self.dropout_rate)(dense_input)  # noqa
+        pred_layer = tf.keras.layers.Dense(
+                self.n_classes, activation=out_activation,
+                bias_initializer=self.bias_initializer,
+                name="prediction")(drop_layer)
+
+        model_inputs = bert_inputs + mask_inputs
+        model = tf.keras.models.Model(inputs=model_inputs, outputs=pred_layer)
+        optimizer = tf.keras.optimizers.Adam(
+                learning_rate=self.learning_rate, epsilon=1e-8)
+        model.compile(loss=loss, optimizer=optimizer, metrics=self.fit_metrics)
+        return model
+
     def get_tokenizer(self):
         bert_layer = self.model.get_layer("bert")
         try:
@@ -232,28 +308,40 @@ class BERTModel(object):
                     sp_model_file)
         return tokenizer
 
-    def tokenize(self, documents):
+    def tokenize(self, documents, masks=["[SUBJ]", "[OBJ]"],
+                 return_subj_obj_masks=False):
         all_token_ids = []
         all_token_masks = []
         all_token_segments = []
+        all_subj_masks = []
+        all_obj_masks = []
         for doc in documents:
             first, _, scnd = doc.partition("[SEP]")
-            scnd_toks = self.tokenizer.tokenize(scnd)
             first_toks = self.tokenizer.tokenize(first)
+            scnd_toks = self.tokenizer.tokenize(scnd)
+
             # subtract 2 for [CLS], [SEP]
             first_maxlen = self.max_seq_length - len(scnd_toks) - 2
             first_toks = self.cut_tokens(first_toks, first_maxlen)
             tokens = ["[CLS]"] + first_toks + ["[SEP]"] + scnd_toks
             # Format as three arrays as expected by BERT
             token_ids = self.get_token_ids(tokens)
-            token_masks = self.get_masks(tokens)
+            token_masks = self.get_token_masks(tokens)
             segments = self.get_segments(tokens)
             all_token_ids.append(token_ids)
             all_token_masks.append(token_masks)
             all_token_segments.append(segments)
-        return [np.array(all_token_ids),
-                np.array(all_token_masks),
-                np.array(all_token_segments)]
+            if return_subj_obj_masks is True:
+                subj_mask, obj_mask = self.get_subj_obj_masks(tokens, masks)
+                all_subj_masks.append(subj_mask)
+                all_obj_masks.append(obj_mask)
+        return_val = [np.array(all_token_ids),
+                      np.array(all_token_masks),
+                      np.array(all_token_segments)]
+        if return_subj_obj_masks is True:
+            return_val.extend([np.array(all_subj_masks),
+                               np.array(all_obj_masks)])
+        return return_val
 
     def compute_loss(self, documents, labels):
         processed_documents = self.tokenize(documents)
