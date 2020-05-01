@@ -16,15 +16,17 @@ class LearningRateLogCallback(tf.keras.callbacks.Callback):
         super(LearningRateLogCallback, self).__init__()
         file_writer = tf.summary.create_file_writer(log_dir + "/metrics")
         file_writer.set_as_default()
+        self.batch = 0
 
-    def on_train_batch_end(self, batch, logs=None):
+    def on_train_batch_end(self, _, logs=None):
         if not hasattr(self.model.optimizer, "learning_rate"):
             raise ValueError("Optimizer must have an 'learning_rate' attribute.")  # noqa
         logs = logs or {}
         learning_rate_fn = tf.keras.backend.get_value(
             self.model.optimizer.learning_rate)
-        learning_rate = learning_rate_fn(batch)
+        learning_rate = learning_rate_fn(self.batch)
         tf.summary.scalar("learning rate", data=learning_rate)
+        self.batch += 1
 
 
 class BERTModel(object):
@@ -38,29 +40,30 @@ class BERTModel(object):
         self.max_seq_length = max_seq_length
         self.batch_size = batch_size
         self.dropout_rate = dropout_rate
-        self.learning_rate = learning_rate
+        self.learning_rate = self._get_learning_rate(learning_rate)
         self.fit_metrics = self._get_metrics(fit_metrics)
         self.initial_bias = initial_bias
         self.bias_initializer = self._get_bias_initializer()
         self._callbacks = []
         if checkpoint_dir is not None:
-            print(checkpoint_dir)
-            self._save_params(checkpoint_dir)
+            print("Writing model checkpoints to: ", checkpoint_dir)
             ckpnt_cb = self._get_checkpoint_callback(checkpoint_dir)
             self._callbacks.append(ckpnt_cb)
         if logdir is not None:
-            print(logdir)
+            print("Writing Tensorboard logs to: ", logdir)
             tb_cb = self._get_tensorboard_callback(logdir)
             self._callbacks.append(tb_cb)
-            lr_log_callback = self._get_learning_rate_log_callback(logdir)
-            self._callbacks.append(lr_log_callback)
+            if isinstance(self.learning_rate,
+                          tf.keras.optimizers.schedules.LearningRateSchedule):
+                lr_log_callback = self._get_learning_rate_log_callback(logdir)
+                self._callbacks.append(lr_log_callback)
         print(self.bert_file)
         print(self.max_seq_length)
         print(self.batch_size)
-        print("getting model...", end='')
+        print("getting model...", end='', flush=True)
         self.model = self.get_model()
         print("done")
-        print("getting tokenizer...", end='')
+        print("getting tokenizer...", end='', flush=True)
         self.tokenizer = self.get_tokenizer()
         print("done")
         self.validation_data = validation_data
@@ -73,6 +76,22 @@ class BERTModel(object):
         bert_model = cls(**params)
         bert_model.model.load_weights(weights_file)
         return bert_model
+
+    def _get_learning_rate(self, learning_rate):
+        if isinstance(learning_rate, str):
+            if learning_rate.lower() == "exponential_decay":
+                scheduler = tf.keras.optimizers.schedules.ExponentialDecay(
+                        initial_learning_rate=2e-5, decay_rate=0.96,
+                        decay_steps=300)
+            elif learning_rate.lower() == "polynomial_decay":
+                scheduler = tf.keras.optimizers.schedules.PolynomialDecay(
+                        initial_learning_rate=2e-5, decay_rate=0.96,
+                        end_learning_rate=0.0, power=2)
+            else:
+                raise ValueError(f"Unknown schedule '{learning_rate}'")
+            return scheduler
+        else:
+            return float(learning_rate)
 
     def _get_bias_initializer(self):
         if self.initial_bias is None:
@@ -92,13 +111,15 @@ class BERTModel(object):
                 raise ValueError(f"Unsupported metric '{m}'")
         return metric_fns
 
-    def _save_params(self, outdir):
-        outfile = os.path.join(outdir, "model.json")
-        params = dict(bert_file=self.bert_file,
+    def save_params(self, outfile):
+        params = dict(n_classes=self.n_classes,
+                      bert_file=self.bert_file,
                       max_seq_length=self.max_seq_length,
                       batch_size=self.batch_size,
+                      learning_rate=self.learning_rate,
+                      dropout_rate=self.dropout_rate,
                       fit_metrics=[m.name for m in self.fit_metrics],
-                      initial_bias=float(self.initial_bias))
+                      initial_bias=list(self.initial_bias))
         with open(outfile, 'w') as outF:
             json.dump(params, outF)
 
@@ -184,20 +205,15 @@ class BERTModel(object):
         pooled_output, seq_output = bert_layer(bert_inputs)
         # dense_input = seq_output[:, 0, :]  # [CLS] output
         dense_input = pooled_output
-        drop_layer = tf.keras.layers.Dropout(rate=0.2)(dense_input)
+        drop_layer = tf.keras.layers.Dropout(rate=self.dropout_rate)(dense_input)  # noqa
         pred_layer = tf.keras.layers.Dense(
                 self.n_classes, activation=out_activation,
                 bias_initializer=self.bias_initializer,
                 name="prediction")(drop_layer)
 
         model = tf.keras.models.Model(inputs=bert_inputs, outputs=pred_layer)
-        scheduler = tf.keras.optimizers.schedules.ExponentialDecay(
-                initial_learning_rate=self.learning_rate,
-                decay_rate=0.96, decay_steps=300)
-        # optimizer = tf.keras.optimizers.Adam(learning_rate=2e-5, epsilon=1e-8)  # noqa
-        # optimizer = tf.keras.optimizers.Adam(
-        #         learning_rate=scheduler, epsilon=1e-8)
-        optimizer = tf.keras.optimizers.SGD(learning_rate=scheduler)
+        optimizer = tf.keras.optimizers.Adam(
+                learning_rate=self.learning_rate, epsilon=1e-8)
         model.compile(loss=loss, optimizer=optimizer, metrics=self.fit_metrics)
         return model
 

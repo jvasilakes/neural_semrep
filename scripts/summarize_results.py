@@ -17,41 +17,53 @@ def parse_args():
     parser.add_argument("--save", action="store_true", default=False,
                         help="""If specified, save plot and
                                 results to results_dir.""")
+    parser.add_argument("--prediction_files", type=str, nargs='*',
+                        default=[])
     return parser.parse_args()
 
 
-def main(results_dir, plot_title=None, save=False):
-    prediction_files = glob(os.path.join(results_dir, "predictions_fold*.csv"))
-
+def main(results_dir, plot_title=None, save=False, prediction_files=[]):
+    if len(prediction_files) == 0:
+        prediction_files = glob(os.path.join(results_dir,
+                                             "predictions_*.csv"))
+    else:
+        prediction_files = [os.path.join(results_dir, f)
+                            for f in prediction_files]
     all_results = pd.DataFrame()
     for infile in prediction_files:
-        fold_results = pd.read_csv(infile)
+        fold_results = pd.read_csv(infile, keep_default_na=False)
         all_results = pd.concat((all_results, fold_results))
     print(f"N={all_results.shape[0]}\n")
+    n_classes = all_results["GOLD"].unique().shape[0]
+    if n_classes == 2:
+        average = "binary"
+    else:
+        average = "weighted"
 
     metrics_outfile = None
     if save is True:
         metrics_outfile = os.path.join(results_dir, "metrics_by_predicate.csv")
-    metrics_by_predicate(all_results, outfile=metrics_outfile)
+    metrics_by_predicate(all_results, outfile=metrics_outfile, average=average)
 
-    plot_outfile = None
-    if save is True:
-        plot_outfile = os.path.join(results_dir, "precision_recall_curve.png")
-    plot_precision_recall_curve(all_results, plot_title=plot_title,
-                                outfile=plot_outfile)
+    if n_classes == 2:
+        plot_outfile = None
+        if save is True:
+            plot_outfile = os.path.join(results_dir, "precision_recall_curve.png")
+        plot_precision_recall_curve(all_results, plot_title=plot_title,
+                                    outfile=plot_outfile)
 
 
-def metrics_by_predicate(results_df, outfile=None):
+def metrics_by_predicate(results_df, outfile=None, average="binary"):
     total_p, total_r, total_f, _ = precision_recall_fscore_support(
             results_df["GOLD"].values, results_df["PREDICTED"].values,
-            average="binary")
+            average=average, zero_division=0)
     total_row = {"PREDICATE": "ALL", "N": results_df.shape[0],
                  "PRECISION": total_p, "RECALL": total_r, "F1": total_f}
     metrics_rows = [total_row]
     for (predicate, group) in results_df.groupby("PREDICATE"):
         prec, rec, f1, _ = precision_recall_fscore_support(
                 group["GOLD"].values, group["PREDICTED"].values,
-                average="binary")
+                average=average, zero_division=0)
         row = {"PREDICATE": predicate, "N": group.shape[0],
                "PRECISION": prec, "RECALL": rec, "F1": f1}
         metrics_rows.append(row)
@@ -65,7 +77,7 @@ def metrics_by_predicate(results_df, outfile=None):
 
 def plot_precision_recall_curve(results_df, plot_title=None, outfile=None):
     y_true = results_df["GOLD"].values
-    y_score = results_df["SCORE_x=1"].values
+    y_score = results_df["SCORES"].values
     precs, recs, _ = precision_recall_curve(y_true, y_score)
 
     fig, ax = plt.subplots(figsize=(10, 8))
@@ -103,4 +115,5 @@ def plot_precision_recall_curve(results_df, plot_title=None, outfile=None):
 
 if __name__ == "__main__":
     args = parse_args()
-    main(args.results_dir, plot_title=args.plot_title, save=args.save)
+    main(args.results_dir, plot_title=args.plot_title, save=args.save,
+         prediction_files=args.prediction_files)
