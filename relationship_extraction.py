@@ -52,6 +52,7 @@ def main(args):
     keep_idxs = list(range(df.shape[0]))
     if args.mask_sentences is True:
         df, keep_idxs = mask_dataframe(df)
+    print(df.shape)
 
     # Assign a NULL predicate to any false predications.
     df.loc[:, "PREDICATE"] = np.where(df["LABEL"] == 'n',  # if
@@ -108,18 +109,18 @@ def main(args):
     if args.from_model_checkpoint is not None:
         weights_file = args.from_model_checkpoint
         params_file = os.path.join(os.path.dirname(weights_file),
-                                   "../model.json")
+                                   f"../{bert_class.name}.json")
         bert = bert_class.from_model_checkpoint(params_file, weights_file)
     else:
         bert = bert_class(n_classes=n_classes, bert_file=args.bert_model_file,
-                          max_seq_length=128, batch_size=16,
+                          max_seq_length=256, batch_size=16,
                           dropout_rate=0.2, learning_rate=2e-5,
                           initial_bias=initial_bias,
                           fit_metrics=["precision", "recall"],
                           validation_data=(val_texts, val_y),
                           checkpoint_dir=ckpt_dir,
                           logdir=tb_logdir)
-    bert.save_params(os.path.join(args.outdir, "model.json"))
+    bert.save_params(os.path.join(args.outdir, f"{bert_class.name}.json"))
 
     initial_loss = bert.compute_loss(train_texts, train_y)[0]
     if n_classes == 1:
@@ -138,18 +139,18 @@ def main(args):
     # EVALUATE
     # Save test examples with their prediction and their scores.
     test_df = df.iloc[test_idxs]
-    evaluate(bert, test_df, test_texts, test_y,
-             args.outdir, binarizer, name="test")
+    evaluate(bert, test_df, test_texts, test_y, args.outdir,
+             binarizer, name="test", header=True)
     val_df = df.iloc[val_idxs]
-    evaluate(bert, val_df, val_texts, val_y,
-             args.outdir, binarizer, name="val")
+    evaluate(bert, val_df, val_texts, val_y, args.outdir,
+             binarizer, name="val", header=False)
     train_df = df.iloc[train_idxs]
-    evaluate(bert, train_df, train_texts, train_y,
-             args.outdir, binarizer, name="train")
+    evaluate(bert, train_df, train_texts, train_y, args.outdir,
+             binarizer, name="train", header=False)
 
 
 def evaluate(bert_model, df, texts, y, outdir,
-             label_binarizer, name="test"):
+             label_binarizer, name="test", header=True):
     predictions = bert_model.predict(texts, predict_classes=True).numpy()
     p, r, f, _ = precision_recall_fscore_support(y, predictions,
                                                  average="micro")
@@ -161,7 +162,8 @@ def evaluate(bert_model, df, texts, y, outdir,
     metrics_outfile = os.path.join(outdir, f"metrics.csv")
     with open(metrics_outfile, 'a') as outF:
         writer = csv.writer(outF)
-        writer.writerow(["DATASET", "PRECISION", "RECALL", "F1"])
+        if header is True:
+            writer.writerow(["DATASET", "PRECISION", "RECALL", "F1"])
         writer.writerow([name, f"{p:.4f}", f"{r:.4f}", f"{f:.4f}"])
 
     scores = bert_model.predict(texts, predict_classes=False).numpy()
@@ -178,10 +180,9 @@ def evaluate(bert_model, df, texts, y, outdir,
             pid = row.PREDICATION_ID
             sent = row.SENTENCE
             subj = row.SUBJECT_TEXT
-            predicate = row.PREDICATE
+            predicate = gold_labels[j]
             obj = row.OBJECT_TEXT
             pred = predicted_labels[j]
-            gold = gold_labels[j]
             score = ','.join([str(s) for s in scores[j]])
             writer.writerow([pid, sent, subj, predicate,
                              obj, pred, gold, score])
@@ -204,6 +205,7 @@ def mask_dataframe(dataframe):
             new_row["SENTENCE"] = masked
             masked_rows.append(new_row)
     masked_df = pd.DataFrame(masked_rows)
+    masked_df = masked_df.set_index("Index")
     return masked_df, keep_idxs
 
 

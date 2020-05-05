@@ -10,7 +10,7 @@ from sklearn.metrics import precision_recall_fscore_support
 
 import sys
 sys.path.append("..")
-from bert_model import BERTModel  # noqa: Module level import not at top of file.
+import bert_model  # noqa: Module level import not at top of file.
 
 np.random.seed(42)
 tf.random.set_seed(42)
@@ -22,29 +22,30 @@ def parse_args():
                         help="""CSV dataset of labeled predications.""")
     parser.add_argument("--outdir", type=str, required=True,
                         help="""Where to save the model predictions.""")
-    parser.add_argument("--bert_model", type=str, required=True,
+    parser.add_argument("--bert_model_file", type=str, required=True,
                         help="""tfhub.dev URL or file path to
                                 saved BERT model.""")
     parser.add_argument("--nfolds", type=int, default=5,
                         help="""Number of CV folds. If 1, train on
                                 the entire dataset.""")
+    parser.add_argument("--epochs", type=int, default=1,
+                        help="""Number of epochs to train for.""")
     parser.add_argument("--mask_sentences", action="store_true", default=False,
                         help="""If True, mask subject and object mentions in
                                 each sentence with [SUBJ] or [OBJ].""")
-    parser.add_argument("--checkpoint_dir", type=str, default=None,
+    parser.add_argument("--checkpoint_dirname", type=str, default=None,
                         help="""Where to save the model checkpoints
                                 at each epoch.""")
-    parser.add_argument("--tensorboard_logdir", type=str, default=None,
+    parser.add_argument("--tensorboard_dirname", type=str, default=None,
                         help="""Where to save the tensorboard logs.""")
     return parser.parse_args()
 
 
-def main(dataset, outdir, bert_model, nfolds,
-         mask_sentences, checkpoint_dir, tensorboard_logdir):
-    df = pd.read_csv(dataset)
+def main(args):
+    df = pd.read_csv(args.dataset)
 
     keep_idxs = list(range(df.shape[0]))
-    if mask_sentences is True:
+    if args.mask_sentences is True:
         df, keep_idxs = mask_dataframe(df)
 
     predicates = df["PREDICATE"].values
@@ -58,25 +59,46 @@ def main(dataset, outdir, bert_model, nfolds,
     print(y.shape)
 
     # Train on the entire dataset and save the model.
-    if nfolds == 1:
+    if args.nfolds == 1:
+
+        os.makedirs(args.outdir, exist_ok=True)
+        ckpt_dir = tb_logdir = None
+        if args.checkpoint_dirname is not None:
+            ckpt_dir = os.path.join(args.outdir, args.checkpoint_dirname)
+            os.makedirs(ckpt_dir, exist_ok=True)
+        if args.tensorboard_dirname is not None:
+            tb_logdir = os.path.join(args.outdir, args.tensorboard_dirname)
+            os.makedirs(tb_logdir, exist_ok=True)
+
         num_pos = y.sum()
         num_neg = y.shape[0] - num_pos
         initial_bias = compute_initial_bias(num_pos, num_neg)
 
-        bert = BERTModel(n_classes=1, bert_file=bert_model,
-                         max_seq_length=128, batch_size=16,
-                         fit_metrics=["precision", "recall"],
-                         initial_bias=initial_bias,
-                         checkpoint_dir=checkpoint_dir,
-                         logdir=tensorboard_logdir)
-        bert.fit(texts, y, epochs=4)
+        bert = bert_model.PooledModel(
+                n_classes=1, bert_file=args.bert_model_file,
+                max_seq_length=256, batch_size=16,
+                fit_metrics=["precision", "recall"],
+                initial_bias=initial_bias,
+                checkpoint_dir=ckpt_dir,
+                logdir=tb_logdir)
+        bert.fit(texts, y, epochs=args.epochs)
         return
 
     precs = []
     recs = []
     f1s = []
-    kf = StratifiedKFold(n_splits=nfolds, shuffle=True)
+    kf = StratifiedKFold(n_splits=args.nfolds, shuffle=True)
     for (i, (train_idxs, test_idxs)) in enumerate(kf.split(texts, predicates)):
+
+        os.makedirs(args.outdir, exist_ok=True)
+        ckpt_dir = tb_logdir = None
+        if args.checkpoint_dirname is not None:
+            ckpt_dir = os.path.join(args.outdir, args.checkpoint_dirname)
+            os.makedirs(ckpt_dir, exist_ok=True)
+        if args.tensorboard_dirname is not None:
+            tb_logdir = os.path.join(args.outdir, args.tensorboard_dirname)
+            os.makedirs(tb_logdir, exist_ok=True)
+
         print(f"=========")
         print(f"Fold: {i + 1}")
         print(f"=========")
@@ -87,14 +109,17 @@ def main(dataset, outdir, bert_model, nfolds,
         num_neg = y_train.shape[0] - num_pos
         initial_bias = compute_initial_bias(num_pos, num_neg)
 
-        logdir = os.path.join(tensorboard_logdir, str(i))
-        os.makedirs(logdir, exist_ok=False)
-        bert = BERTModel(n_classes=1, bert_file=bert_model,
-                         max_seq_length=128, batch_size=16,
-                         fit_metrics=["precision", "recall"],
-                         initial_bias=initial_bias,
-                         checkpoint_dir=checkpoint_dir,
-                         logdir=logdir)
+        fold_tb_logdir = os.path.join(tb_logdir, str(i))
+        os.makedirs(fold_tb_logdir, exist_ok=False)
+        fold_ckpt_dir = os.path.join(ckpt_dir, str(i))
+        os.makedirs(fold_ckpt_dir, exist_ok=False)
+        bert = bert_model.PooledModel(
+                n_classes=1, bert_file=args.bert_model_file,
+                max_seq_length=128, batch_size=16,
+                fit_metrics=["precision", "recall"],
+                initial_bias=initial_bias,
+                checkpoint_dir=fold_ckpt_dir,
+                logdir=fold_tb_logdir)
 
         initial_loss = bert.compute_loss(train_texts, y_train)[0]
         expected_loss = compute_expected_loss(num_pos, y_train.shape[0])
@@ -103,7 +128,7 @@ def main(dataset, outdir, bert_model, nfolds,
         print(f"Expected loss: {expected_loss:.4f}")
         print("------------------------------")
 
-        bert.fit(train_texts, y_train, epochs=4)
+        bert.fit(train_texts, y_train, epochs=args.epochs)
         preds = bert.predict(test_texts, predict_classes=True)
         p, r, f, _ = precision_recall_fscore_support(y_test, preds,
                                                      average="binary")
@@ -115,7 +140,7 @@ def main(dataset, outdir, bert_model, nfolds,
         test_df = df.iloc[test_idxs]
         scores = bert.predict(test_texts, predict_classes=False)
         predictions_outfile = os.path.join(
-                outdir, f"predictions_fold{i + 1}.csv")
+                args.outdir, f"predictions_fold{i + 1}.csv")
         with open(predictions_outfile, 'w') as outF:
             writer = csv.writer(outF)
             writer.writerow(["PREDICATION_ID", "SENTENCE", "SUBJ",
@@ -132,7 +157,7 @@ def main(dataset, outdir, bert_model, nfolds,
                 score = float(scores[j])
                 writer.writerow([pid, sent, subj, predicate,
                                  obj, pred, gold, score])
-        metrics_outfile = os.path.join(outdir, f"metrics.csv")
+        metrics_outfile = os.path.join(args.outdir, f"metrics.csv")
         mode = 'a'
         if i == 0:
             mode = 'w'
@@ -220,5 +245,4 @@ def compute_expected_loss(num_pos, total):
 
 if __name__ == "__main__":
     args = parse_args()
-    main(args.dataset, args.outdir, args.bert_model, args.nfolds,
-         args.mask_sentences, args.checkpoint_dir, args.tensorboard_logdir)
+    main(args)

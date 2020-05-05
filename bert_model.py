@@ -58,6 +58,7 @@ class BERTModel(object):
                  dropout_rate=0.2, learning_rate=2e-5,
                  validation_data=None, fit_metrics=["accuracy"],
                  initial_bias=None, checkpoint_dir=None, logdir=None):
+        self.name = "BERTModel"
         self.n_classes = n_classes
         self.bert_file = bert_file
         self.max_seq_length = max_seq_length
@@ -376,8 +377,7 @@ class EntityModel(BERTModel):
     [  1     0     0     0     0     0  ] # [SUBJ] mask (masks context emb)
     [  0     0     0     1     0     0  ] # [OBJ] mask  (masks context emb)
                  |
-           [[float_subj],
-            [float_obj]]                  # vstack
+           [float_subj, float_obj]        # Element-wise sum over subj/obj tokens followed by a reshape  # noqa
                  |
            Dropout + Dense
 
@@ -400,12 +400,18 @@ class EntityModel(BERTModel):
     :param str logdir: (Default None) Path to directory in which to
                                save tensorboard logs. Creates it if it
                                doesn't exist. If None, don't save logs.
+    :param list(str) mask_tokens: (Default ['[ARG1]', '[ARG2]']) DANGER!
+                                  Changing this from the default can result
+                                  in unexpected bad behavior or errors!
+                                  A list of length 2 defining the tokens
+                                  used to mask the subject and objects of
+                                  a predication in the given sentence.
     """
     def __init__(self, mask_tokens=["[ARG1]", "[ARG2]"], *args, **kwargs):
-        self.name = "EntityModel"
         self.mask_tokens = mask_tokens
         print(f"Initializing {self.name}")
         super().__init__(*args, **kwargs)
+        self.name = "EntityModel"
 
     def _get_subj_obj_masks(self, tokens):
         """Returns indices in ragne(max_seq_length)
