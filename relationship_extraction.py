@@ -12,7 +12,7 @@ from collections import Counter
 
 import sys
 sys.path.append("..")
-from bert_model import BERTModel  # noqa: Module level import not at top of file.
+import bert_model  # noqa: Module level import not at top of file.
 
 np.random.seed(42)
 tf.random.set_seed(42)
@@ -24,12 +24,16 @@ def parse_args():
                         help="""CSV dataset of labeled predications.""")
     parser.add_argument("--outdir", type=str, required=True,
                         help="""Where to save the model predictions.""")
-    parser.add_argument("--bert_model", type=str, required=True,
+    parser.add_argument("--bert_model_file", type=str, required=True,
                         help="""tfhub.dev URL or file path to
                                 saved BERT model.""")
+    parser.add_argument("--bert_model_class", type=str, default="pooled",
+                        choices=["pooled", "entity"],
+                        help="""Which model class (from bert_models.py)
+                                to use.""")
     parser.add_argument("--mask_sentences", action="store_true", default=False,
                         help="""If True, mask subject and object mentions in
-                                each sentence with [SUBJ] or [OBJ].""")
+                                each sentence with [ARG1] or [ARG2].""")
     parser.add_argument("--epochs", type=int, default=1,
                         help="""Number of training epochs.""")
     parser.add_argument("--checkpoint_dirname", type=str, default=None,
@@ -88,9 +92,13 @@ def main(args):
 
     initial_bias = compute_initial_bias(train_y)
     print(f"Initial bias: {initial_bias}")
+
+    bert_class = get_bert_model_class(args.bert_model_class)
+    print("Using BERT model: ", bert_class)
     input()
 
     os.makedirs(args.outdir, exist_ok=False)
+    ckpt_dir = tb_logdir = None
     if args.checkpoint_dirname is not None:
         ckpt_dir = os.path.join(args.outdir, args.checkpoint_dirname)
         os.makedirs(ckpt_dir, exist_ok=True)
@@ -101,16 +109,16 @@ def main(args):
         weights_file = args.from_model_checkpoint
         params_file = os.path.join(os.path.dirname(weights_file),
                                    "../model.json")
-        bert = BERTModel.from_model_checkpoint(params_file, weights_file)
+        bert = bert_class.from_model_checkpoint(params_file, weights_file)
     else:
-        bert = BERTModel(n_classes=n_classes, bert_file=args.bert_model,
-                         max_seq_length=128, batch_size=16,
-                         dropout_rate=0.2, learning_rate=2e-5,
-                         initial_bias=initial_bias,
-                         fit_metrics=["precision", "recall"],
-                         validation_data=(val_texts, val_y),
-                         checkpoint_dir=ckpt_dir,
-                         logdir=tb_logdir)
+        bert = bert_class(n_classes=n_classes, bert_file=args.bert_model_file,
+                          max_seq_length=128, batch_size=16,
+                          dropout_rate=0.2, learning_rate=2e-5,
+                          initial_bias=initial_bias,
+                          fit_metrics=["precision", "recall"],
+                          validation_data=(val_texts, val_y),
+                          checkpoint_dir=ckpt_dir,
+                          logdir=tb_logdir)
     bert.save_params(os.path.join(args.outdir, "model.json"))
 
     initial_loss = bert.compute_loss(train_texts, train_y)[0]
@@ -163,8 +171,8 @@ def evaluate(bert_model, df, texts, y, outdir,
     gold_labels = label_binarizer.inverse_transform(y)
     with open(predictions_outfile, 'w') as outF:
         writer = csv.writer(outF)
-        writer.writerow(["PREDICATION_ID", "SENTENCE", "SUBJ",
-                         "PREDICATE", "OBJ", "PREDICTED",
+        writer.writerow(["PREDICATION_ID", "SENTENCE", "ARG1",
+                         "PREDICATE", "ARG2", "PREDICTED",
                          "GOLD", "SCORES"])
         for (j, row) in enumerate(df.itertuples()):
             pid = row.PREDICATION_ID
@@ -191,8 +199,8 @@ def mask_dataframe(dataframe):
         if masked is not None:
             keep_idxs.append(i)
             new_row = row._asdict()
-            new_row["SUBJECT_TEXT"] = "[SUBJ]"
-            new_row["OBJECT_TEXT"] = "[OBJ]"
+            new_row["SUBJECT_TEXT"] = "[ARG1]"
+            new_row["OBJECT_TEXT"] = "[ARG2]"
             new_row["SENTENCE"] = masked
             masked_rows.append(new_row)
     masked_df = pd.DataFrame(masked_rows)
@@ -210,7 +218,7 @@ def mask_mentions(sent, subj_text, obj_text):
         subj_start, subj_end = re.search(fr"\b{subj_text_esc}\b", sent).span()
     except AttributeError:
         return None
-    new_sent = sent[:subj_start] + "[SUBJ]" + sent[subj_end:]
+    new_sent = sent[:subj_start] + "[ARG1]" + sent[subj_end:]
 
     obj_text_esc = re.escape(obj_text)
     if len(re.findall(fr"\b{subj_text_esc}\b", sent)) > 1:
@@ -219,7 +227,7 @@ def mask_mentions(sent, subj_text, obj_text):
         obj_start, obj_end = re.search(fr"\b{obj_text_esc}\b", new_sent).span()
     except AttributeError:
         return None
-    new_sent = new_sent[:obj_start] + "[OBJ]" + new_sent[obj_end:]
+    new_sent = new_sent[:obj_start] + "[ARG2]" + new_sent[obj_end:]
     return new_sent
 
 
@@ -250,6 +258,17 @@ def compute_expected_loss_categorical(labels):
     """Assumes labels are binary encoded"""
     p_0 = labels.sum(axis=0) / labels.shape[0]
     return -np.sum(p_0 * np.log(p_0))
+
+
+def get_bert_model_class(model_class_string):
+    lookup = {
+              "pooled": bert_model.PooledModel,
+              "entity": bert_model.EntityModel,
+              }
+    try:
+        return lookup[model_class_string]
+    except KeyError:
+        raise KeyError(f"BERT model '{model_class_string}' not supported.")
 
 
 if __name__ == "__main__":

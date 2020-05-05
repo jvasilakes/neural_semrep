@@ -30,6 +30,29 @@ class LearningRateLogCallback(tf.keras.callbacks.Callback):
 
 
 class BERTModel(object):
+    """
+    The generic BERT-based model. Subclass to implement
+    your chosen architecture.
+    :param int n_classes: Number of output classes. Use 1 or 2 for binary.
+    :param str bert_file: Path to tensorflow_hub compatible BERT model.
+    :param int max_seq_length: (Default 128) Maximum input sequence length.
+    :param int batch_size: (Default 16) Batch size.
+    :param float dropout_rate: (Default 0.2) Dropout rate for dropout layer
+                               after BERT layer.
+    :param float learning_rate: (Default 2e-5) The learning rate.
+    :param tuple(np.array) validation_data: (X, y) tuple of validation data.
+    :param list(str) fit_metrics: (Default ['accuracy']) List of metrics to
+                                 compute during training.
+    :param np.array(float) initial_bias: (Default None) If None, use 'zeros'.
+                                         Otherwise, initialize with the given
+                                         constant values.
+    :param str checkpoint_dir: (Default None) Path to directory in which to
+                               save model checkpoints. Creates it if it
+                               doesn't exist. If None, don't save checkpoints.
+    :param str logdir: (Default None) Path to directory in which to
+                               save tensorboard logs. Creates it if it
+                               doesn't exist. If None, don't save logs.
+    """
 
     def __init__(self, n_classes, bert_file, max_seq_length=128, batch_size=16,
                  dropout_rate=0.2, learning_rate=2e-5,
@@ -69,6 +92,18 @@ class BERTModel(object):
         self.validation_data = validation_data
         if self.validation_data is not None:
             self.validation_data = self._prep_validation_data(validation_data)
+
+    def get_model(self, *args, **kwargs):
+        """
+        Implement subclass with your desired architecture.
+        """
+        raise NotImplementedError
+
+    def tokenize(self, *args, **kwargs):
+        """
+        Implement subclass with tokenization for your desired architecture.
+        """
+        raise NotImplementedError
 
     @classmethod
     def from_model_checkpoint(cls, params_file, weights_file):
@@ -179,32 +214,113 @@ class BERTModel(object):
         all_segments = segments + [0] * (self.max_seq_length - len(tokens))
         return np.array(all_segments)
 
-    def get_subj_obj_masks(self, tokens, masks):
-        """Returns indices in ragne(max_seq_length)
-           of [SUBJ] and [OBJ] tokens."""
-        if len(tokens) > self.max_seq_length:
-            raise IndexError("Token length more than max seq length!")
-        subj_tokenized = self.tokenizer.tokenize(masks[0])
-        obj_tokenized = self.tokenizer.tokenize(masks[1])
+    def get_tokenizer(self):
+        bert_layer = self.model.get_layer("bert")
+        try:
+            vocab_file = bert_layer.resolved_object.vocab_file.asset_path.numpy()  # noqa
+            do_lower_case = bert_layer.resolved_object.do_lower_case.numpy()
+            tokenizer = bert_tokenization.FullTokenizer(vocab_file,
+                                                        do_lower_case)
+        # AlBERT uses a different tokenizer.
+        # AttributeError: '_UserObject' object has no attribute 'vocab_file'
+        except AttributeError:
+            sp_model_file = bert_layer.resolved_object.sp_model_file.asset_path.numpy()  # noqa
+            tokenizer = bert_tokenization.FullSentencePieceTokenizer(
+                    sp_model_file)
+        return tokenizer
 
-        subj_mask = np.zeros(shape=(self.max_seq_length,), dtype=int)
-        obj_mask = np.zeros(shape=(self.max_seq_length,), dtype=int)
+    def compute_loss(self, documents, labels):
+        processed_documents = self.tokenize(documents)
+        loss = self.model.evaluate(processed_documents, labels,
+                                   batch_size=self.batch_size,
+                                   verbose=0)
+        return loss
 
-        def getsubidx(x, y):
-            lx, ly = len(x), len(y)
-            for i in range(lx):
-                if x[i:i+ly] == y:
-                    return i
+    def fit(self, documents, labels, epochs=1, **tokenize_kwargs):
+        processed_documents = self.tokenize(documents, **tokenize_kwargs)
+        self.train_history = self.model.fit(
+                processed_documents, labels, batch_size=self.batch_size,
+                epochs=epochs, validation_data=self.validation_data,
+                callbacks=self._callbacks)
 
-        subj_start = getsubidx(tokens, subj_tokenized)
-        if subj_start is not None:
-            subj_end = subj_start + len(subj_tokenized)
-            subj_mask[subj_start:subj_end] = 1
-        obj_start = getsubidx(tokens, obj_tokenized)
-        if obj_start is not None:
-            obj_end = obj_start + len(obj_tokenized)
-            obj_mask[obj_start:obj_end] = 1
-        return (subj_mask, obj_mask)
+    def predict(self, documents, predict_classes=True, **tokenize_kwargs):
+        processed_documents = self.tokenize(documents, **tokenize_kwargs)
+        scores = self.model.predict(processed_documents,
+                                    batch_size=self.batch_size)
+        scores = tf.squeeze(scores)
+        if predict_classes is True:
+            predictions = tf.cast(scores >= 0.5, dtype=tf.int32)
+            return predictions
+        return scores
+
+    def _compute_sample_weights(self, y):
+
+        def weight(count, total):
+            return (1 / count) * (total / 2)
+
+        total = y.shape[0]
+        counts = Counter(y)
+        weights = {l: weight(c, total) for (l, c) in counts.items()}
+        print("Sample weights: ", weights)
+        weights = np.array([weights[l] for l in y])
+        return weights
+
+
+class PooledModel(BERTModel):
+    """
+    BERT pooled output -> dropout -> dense
+
+    :param int n_classes: Number of output classes. Use 1 or 2 for binary.
+    :param str bert_file: Path to tensorflow_hub compatible BERT model.
+    :param int max_seq_length: (Default 128) Maximum input sequence length.
+    :param int batch_size: (Default 16) Batch size.
+    :param float dropout_rate: (Default 0.2) Dropout rate for dropout layer
+                               after BERT layer.
+    :param float learning_rate: (Default 2e-5) The learning rate.
+    :param tuple(np.array) validation_data: (X, y) tuple of validation data.
+    :param list(str) fit_metrics: (Default ['accuracy']) List of metrics to
+                                 compute during training.
+    :param np.array(float) initial_bias: (Default None) If None, use 'zeros'.
+                                         Otherwise, initialize with the given
+                                         constant values.
+    :param str checkpoint_dir: (Default None) Path to directory in which to
+                               save model checkpoints. Creates it if it
+                               doesn't exist. If None, don't save checkpoints.
+    :param str logdir: (Default None) Path to directory in which to
+                               save tensorboard logs. Creates it if it
+                               doesn't exist. If None, don't save logs.
+    """
+    def __init__(self, *args, **kwargs):
+        self.name = "PooledModel"
+        print(f"Initializing {self.name}")
+        super().__init__(*args, **kwargs)
+
+    def tokenize(self, documents):
+        self._all_raw_tokens = []
+        all_token_ids = []
+        all_token_masks = []
+        all_token_segments = []
+        for doc in documents:
+            first, _, scnd = doc.partition("[SEP]")
+            first_toks = self.tokenizer.tokenize(first)
+            scnd_toks = self.tokenizer.tokenize(scnd)
+
+            # subtract 2 for [CLS], [SEP]
+            first_maxlen = self.max_seq_length - len(scnd_toks) - 2
+            first_toks = self.cut_tokens(first_toks, first_maxlen)
+            tokens = ["[CLS]"] + first_toks + ["[SEP]"] + scnd_toks
+            self._all_raw_tokens.append(tokens)
+            # Format as three arrays as expected by BERT
+            token_ids = self.get_token_ids(tokens)
+            token_masks = self.get_token_masks(tokens)
+            segments = self.get_segments(tokens)
+            all_token_ids.append(token_ids)
+            all_token_masks.append(token_masks)
+            all_token_segments.append(segments)
+        return_val = [np.array(all_token_ids),
+                      np.array(all_token_masks),
+                      np.array(all_token_segments)]
+        return return_val
 
     def get_model(self):
         if self.n_classes in [1, 2]:
@@ -244,7 +360,116 @@ class BERTModel(object):
         model.compile(loss=loss, optimizer=optimizer, metrics=self.fit_metrics)
         return model
 
-    def get_seq_model(self):
+
+class EntityModel(BERTModel):
+    """
+    BERT sequence_output -> subject and object context embeddings ->
+    dropout -> dense
+    I.e.
+
+    '[SUBJ] went to the [OBJ] yesterday'  # Input sentence
+                 |
+                BERT                      # BERT layer
+                 |
+    [float float float float float float] # Context embeddings
+                 |
+    [  1     0     0     0     0     0  ] # [SUBJ] mask (masks context emb)
+    [  0     0     0     1     0     0  ] # [OBJ] mask  (masks context emb)
+                 |
+           [[float_subj],
+            [float_obj]]                  # vstack
+                 |
+           Dropout + Dense
+
+    :param int n_classes: Number of output classes. Use 1 or 2 for binary.
+    :param str bert_file: Path to tensorflow_hub compatible BERT model.
+    :param int max_seq_length: (Default 128) Maximum input sequence length.
+    :param int batch_size: (Default 16) Batch size.
+    :param float dropout_rate: (Default 0.2) Dropout rate for dropout layer
+                               after BERT layer.
+    :param float learning_rate: (Default 2e-5) The learning rate.
+    :param tuple(np.array) validation_data: (X, y) tuple of validation data.
+    :param list(str) fit_metrics: (Default ['accuracy']) List of metrics to
+                                 compute during training.
+    :param np.array(float) initial_bias: (Default None) If None, use 'zeros'.
+                                         Otherwise, initialize with the given
+                                         constant values.
+    :param str checkpoint_dir: (Default None) Path to directory in which to
+                               save model checkpoints. Creates it if it
+                               doesn't exist. If None, don't save checkpoints.
+    :param str logdir: (Default None) Path to directory in which to
+                               save tensorboard logs. Creates it if it
+                               doesn't exist. If None, don't save logs.
+    """
+    def __init__(self, mask_tokens=["[ARG1]", "[ARG2]"], *args, **kwargs):
+        self.name = "EntityModel"
+        self.mask_tokens = mask_tokens
+        print(f"Initializing {self.name}")
+        super().__init__(*args, **kwargs)
+
+    def _get_subj_obj_masks(self, tokens):
+        """Returns indices in ragne(max_seq_length)
+           of [SUBJ] and [OBJ] tokens."""
+        if len(tokens) > self.max_seq_length:
+            raise IndexError("Token length more than max seq length!")
+        subj_toks = self.tokenizer.tokenize(self.mask_tokens[0])
+        obj_toks = self.tokenizer.tokenize(self.mask_tokens[1])
+
+        subj_mask = np.zeros(shape=(self.max_seq_length,), dtype=int)
+        obj_mask = np.zeros(shape=(self.max_seq_length,), dtype=int)
+
+        def getsubidx(x, y):
+            lx, ly = len(x), len(y)
+            for i in range(lx):
+                if x[i:i+ly] == y:
+                    return i
+
+        subj_start = getsubidx(tokens, subj_toks)
+        if subj_start is not None:
+            subj_end = subj_start + len(subj_toks)
+            subj_mask[subj_start:subj_end] = 1
+        obj_start = getsubidx(tokens, obj_toks)
+        if obj_start is not None:
+            obj_end = obj_start + len(obj_toks)
+            obj_mask[obj_start:obj_end] = 1
+        return (subj_mask, obj_mask)
+
+    def tokenize(self, documents):
+        """Adds mask inputs."""
+        self._all_raw_tokens = []
+        all_token_ids = []
+        all_token_masks = []
+        all_token_segments = []
+        all_subj_masks = []
+        all_obj_masks = []
+        for doc in documents:
+            first, _, scnd = doc.partition("[SEP]")
+            first_toks = self.tokenizer.tokenize(first)
+            scnd_toks = self.tokenizer.tokenize(scnd)
+
+            # subtract 2 for [CLS], [SEP]
+            first_maxlen = self.max_seq_length - len(scnd_toks) - 2
+            first_toks = self.cut_tokens(first_toks, first_maxlen)
+            tokens = ["[CLS]"] + first_toks + ["[SEP]"] + scnd_toks
+            self._all_raw_tokens.append(tokens)
+            # Format as three arrays as expected by BERT
+            token_ids = self.get_token_ids(tokens)
+            token_masks = self.get_token_masks(tokens)
+            segments = self.get_segments(tokens)
+            subj_mask, obj_mask = self._get_subj_obj_masks(tokens)
+            all_token_ids.append(token_ids)
+            all_token_masks.append(token_masks)
+            all_token_segments.append(segments)
+            all_subj_masks.append(subj_mask)
+            all_obj_masks.append(obj_mask)
+        return_val = [np.array(all_token_ids),
+                      np.array(all_token_masks),
+                      np.array(all_token_segments),
+                      np.array(all_subj_masks),
+                      np.array(all_obj_masks)]
+        return return_val
+
+    def get_model(self):
         if self.n_classes in [1, 2]:
             out_activation = "sigmoid"
             loss = "binary_crossentropy"
@@ -276,11 +501,15 @@ class BERTModel(object):
                                     trainable=True, name="bert")
 
         pooled_output, seq_output = bert_layer(bert_inputs)
-        # dense_input = seq_output[:, 0, :]  # [CLS] output
+        # We mask the subject and object individually to control their
+        # order when passed to the Dense layer.
         subj = tf.boolean_mask(seq_output, subj_mask, axis=0, name="subj_mask")
         obj = tf.boolean_mask(seq_output, obj_mask, axis=0, name="obj_mask")
         dense_input = tf.stack([subj, obj], axis=1)
-        drop_layer = tf.keras.layers.Dropout(rate=self.dropout_rate)(dense_input)  # noqa
+        total_mask_length = 10
+        dense_input = tf.reshape(dense_input, (-1, total_mask_length*768))
+        drop_layer = tf.keras.layers.Dropout(
+                rate=self.dropout_rate, name="dropout")(dense_input)
         pred_layer = tf.keras.layers.Dense(
                 self.n_classes, activation=out_activation,
                 bias_initializer=self.bias_initializer,
@@ -292,89 +521,3 @@ class BERTModel(object):
                 learning_rate=self.learning_rate, epsilon=1e-8)
         model.compile(loss=loss, optimizer=optimizer, metrics=self.fit_metrics)
         return model
-
-    def get_tokenizer(self):
-        bert_layer = self.model.get_layer("bert")
-        try:
-            vocab_file = bert_layer.resolved_object.vocab_file.asset_path.numpy()  # noqa
-            do_lower_case = bert_layer.resolved_object.do_lower_case.numpy()
-            tokenizer = bert_tokenization.FullTokenizer(vocab_file,
-                                                        do_lower_case)
-        # AlBERT uses a different tokenizer.
-        # AttributeError: '_UserObject' object has no attribute 'vocab_file'
-        except AttributeError:
-            sp_model_file = bert_layer.resolved_object.sp_model_file.asset_path.numpy()  # noqa
-            tokenizer = bert_tokenization.FullSentencePieceTokenizer(
-                    sp_model_file)
-        return tokenizer
-
-    def tokenize(self, documents, masks=["[SUBJ]", "[OBJ]"],
-                 return_subj_obj_masks=False):
-        all_token_ids = []
-        all_token_masks = []
-        all_token_segments = []
-        all_subj_masks = []
-        all_obj_masks = []
-        for doc in documents:
-            first, _, scnd = doc.partition("[SEP]")
-            first_toks = self.tokenizer.tokenize(first)
-            scnd_toks = self.tokenizer.tokenize(scnd)
-
-            # subtract 2 for [CLS], [SEP]
-            first_maxlen = self.max_seq_length - len(scnd_toks) - 2
-            first_toks = self.cut_tokens(first_toks, first_maxlen)
-            tokens = ["[CLS]"] + first_toks + ["[SEP]"] + scnd_toks
-            # Format as three arrays as expected by BERT
-            token_ids = self.get_token_ids(tokens)
-            token_masks = self.get_token_masks(tokens)
-            segments = self.get_segments(tokens)
-            all_token_ids.append(token_ids)
-            all_token_masks.append(token_masks)
-            all_token_segments.append(segments)
-            if return_subj_obj_masks is True:
-                subj_mask, obj_mask = self.get_subj_obj_masks(tokens, masks)
-                all_subj_masks.append(subj_mask)
-                all_obj_masks.append(obj_mask)
-        return_val = [np.array(all_token_ids),
-                      np.array(all_token_masks),
-                      np.array(all_token_segments)]
-        if return_subj_obj_masks is True:
-            return_val.extend([np.array(all_subj_masks),
-                               np.array(all_obj_masks)])
-        return return_val
-
-    def compute_loss(self, documents, labels):
-        processed_documents = self.tokenize(documents)
-        loss = self.model.evaluate(processed_documents, labels,
-                                   batch_size=self.batch_size,
-                                   verbose=0)
-        return loss
-
-    def fit(self, documents, labels, epochs=1):
-        processed_documents = self.tokenize(documents)
-        self.train_history = self.model.fit(
-                processed_documents, labels, batch_size=self.batch_size,
-                epochs=epochs, validation_data=self.validation_data,
-                callbacks=self._callbacks)
-
-    def predict(self, documents, predict_classes=True):
-        processed_documents = self.tokenize(documents)
-        scores = self.model.predict(processed_documents,
-                                    batch_size=self.batch_size)
-        scores = tf.squeeze(scores)
-        if predict_classes is True:
-            predictions = tf.cast(scores >= 0.5, dtype=tf.int32)
-            return predictions
-        return scores
-
-    def _compute_sample_weights(self, y):
-
-        def weight(count, total):
-            return (1 / count) * (total / 2)
-
-        total = y.shape[0]
-        counts = Counter(y)
-        weights = {l: weight(c, total) for (l, c) in counts.items()}
-        print("Sample weights: ", weights)
-        weights = np.array([weights[l] for l in y])
-        return weights
