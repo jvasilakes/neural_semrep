@@ -7,8 +7,6 @@ from collections import Counter
 
 import bert_tokenization
 
-tf.random.set_seed(42)
-
 
 class LearningRateLogCallback(tf.keras.callbacks.Callback):
 
@@ -29,6 +27,34 @@ class LearningRateLogCallback(tf.keras.callbacks.Callback):
         self.batch += 1
 
 
+class MaskReduceLayer(tf.keras.layers.Layer):
+    """
+    Optionally applies a boolean mask to the time
+    dimension of the NxK input tensor, then
+    sums the components to return a K dimensional vector.
+
+    input = [I, ate, dinner]
+    mask = [True, False, True]
+    onehot_input = [[1, 0, 0],
+                    [0, 1, 0],
+                    [0, 0, 1]]
+    masked = MaskReduceLayer()(onehot_input, mask)
+    print(mask)
+
+    [1, 0, 1]  # Elementwise sum of 'I' and 'dinner'
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def call(self, inputs, mask=None):
+        if mask is None:
+            masked = inputs
+        else:
+            masked = tf.ragged.boolean_mask(inputs, mask)
+        return tf.reduce_sum(masked, axis=1)
+
+
 class BERTModel(object):
     """
     The generic BERT-based model. Subclass to implement
@@ -40,6 +66,9 @@ class BERTModel(object):
     :param float dropout_rate: (Default 0.2) Dropout rate for dropout layer
                                after BERT layer.
     :param float learning_rate: (Default 2e-5) The learning rate.
+    :param int random_seed: Set the tensorflow random seed.
+    :param bool bert_trainable: (Default True) Whether to allow fine-tuning
+                                of the BERT layer.
     :param tuple(np.array) validation_data: (X, y) tuple of validation data.
     :param list(str) fit_metrics: (Default ['accuracy']) List of metrics to
                                  compute during training.
@@ -54,17 +83,23 @@ class BERTModel(object):
                                doesn't exist. If None, don't save logs.
     """
 
-    def __init__(self, n_classes, bert_file, max_seq_length=128, batch_size=16,
-                 dropout_rate=0.2, learning_rate=2e-5,
-                 validation_data=None, fit_metrics=["accuracy"],
-                 initial_bias=None, checkpoint_dir=None, logdir=None):
-        self.name = "BERTModel"
+    name = "BERTModel"
+
+    def __init__(self, n_classes, bert_file, max_seq_length=128,
+                 batch_size=16, dropout_rate=0.2, learning_rate=2e-5,
+                 random_seed=None, bert_trainable=True, validation_data=None,
+                 fit_metrics=["accuracy"], initial_bias=None,
+                 checkpoint_dir=None, logdir=None):
+        if random_seed is not None:
+            self.random_seed = random_seed
+            tf.random.set_seed(random_seed)
         self.n_classes = n_classes
         self.bert_file = bert_file
         self.max_seq_length = max_seq_length
         self.batch_size = batch_size
         self.dropout_rate = dropout_rate
         self.learning_rate = self._get_learning_rate(learning_rate)
+        self.bert_trainable = bert_trainable
         self.fit_metrics = self._get_metrics(fit_metrics)
         self.initial_bias = initial_bias
         self.bias_initializer = self._get_bias_initializer()
@@ -81,18 +116,14 @@ class BERTModel(object):
                           tf.keras.optimizers.schedules.LearningRateSchedule):
                 lr_log_callback = self._get_learning_rate_log_callback(logdir)
                 self._callbacks.append(lr_log_callback)
-        print(self.bert_file)
-        print(self.max_seq_length)
-        print(self.batch_size)
-        print("getting model...", end='', flush=True)
         self.model = self.get_model()
-        print("done")
-        print("getting tokenizer...", end='', flush=True)
         self.tokenizer = self.get_tokenizer()
-        print("done")
         self.validation_data = validation_data
         if self.validation_data is not None:
             self.validation_data = self._prep_validation_data(validation_data)
+        self.config = self._collect_config()
+        for (key, value) in self.config.items():
+            print(f"{key}: {value}")
 
     def get_model(self, *args, **kwargs):
         """
@@ -147,17 +178,24 @@ class BERTModel(object):
                 raise ValueError(f"Unsupported metric '{m}'")
         return metric_fns
 
-    def save_params(self, outfile):
-        params = dict(n_classes=self.n_classes,
+    def _collect_config(self):
+        config = dict(n_classes=self.n_classes,
                       bert_file=self.bert_file,
                       max_seq_length=self.max_seq_length,
                       batch_size=self.batch_size,
                       learning_rate=self.learning_rate,
+                      bert_trainable=self.bert_trainable,
+                      random_seed=self.random_seed,
                       dropout_rate=self.dropout_rate,
                       fit_metrics=[m.name for m in self.fit_metrics],
                       initial_bias=list(self.initial_bias))
+        return config
+
+    def save_params(self, outfile):
+        if self.config is None:
+            raise ValueError("Config not defined yet. Please run __init__")
         with open(outfile, 'w') as outF:
-            json.dump(params, outF)
+            json.dump(self.config, outF)
 
     def _get_checkpoint_callback(self, checkpoint_dir):
         fname = "weights.{epoch:02d}-{loss:.2f}.hdf5"
@@ -242,7 +280,7 @@ class BERTModel(object):
         self.train_history = self.model.fit(
                 processed_documents, labels, batch_size=self.batch_size,
                 epochs=epochs, validation_data=self.validation_data,
-                callbacks=self._callbacks)
+                callbacks=self._callbacks, verbose=2)
 
     def predict(self, documents, predict_classes=True, **tokenize_kwargs):
         processed_documents = self.tokenize(documents, **tokenize_kwargs)
@@ -278,6 +316,9 @@ class PooledModel(BERTModel):
     :param float dropout_rate: (Default 0.2) Dropout rate for dropout layer
                                after BERT layer.
     :param float learning_rate: (Default 2e-5) The learning rate.
+    :param int random_seed: Set the tensorflow random seed.
+    :param bool bert_trainable: (Default True) Whether to allow fine-tuning
+                                of the BERT layer.
     :param tuple(np.array) validation_data: (X, y) tuple of validation data.
     :param list(str) fit_metrics: (Default ['accuracy']) List of metrics to
                                  compute during training.
@@ -291,8 +332,10 @@ class PooledModel(BERTModel):
                                save tensorboard logs. Creates it if it
                                doesn't exist. If None, don't save logs.
     """
+
+    name = "PooledModel"
+
     def __init__(self, *args, **kwargs):
-        self.name = "PooledModel"
         print(f"Initializing {self.name}")
         super().__init__(*args, **kwargs)
 
@@ -344,7 +387,8 @@ class PooledModel(BERTModel):
         bert_inputs = [input_word_ids, input_mask, segment_ids]
 
         bert_layer = hub.KerasLayer(self.bert_file,
-                                    trainable=True, name="bert")
+                                    trainable=self.bert_trainable,
+                                    name="bert")
 
         pooled_output, seq_output = bert_layer(bert_inputs)
         # dense_input = seq_output[:, 0, :]  # [CLS] output
@@ -368,18 +412,20 @@ class EntityModel(BERTModel):
     dropout -> dense
     I.e.
 
-    '[SUBJ] went to the [OBJ] yesterday'  # Input sentence
+    '[SUBJ] went to the [OBJ] yesterday'    # Input sentence
                  |
-                BERT                      # BERT layer
+                BERT                        # BERT layer
                  |
-    [float float float float float float] # Context embeddings
+    [[float float float float float float]  # Context embeddings
+                  ...                       # (batch_size, max_seq_lenth, 768)
+     [float float float float float float]]
                  |
-    [  1     0     0     0     0     0  ] # [SUBJ] mask (masks context emb)
-    [  0     0     0     1     0     0  ] # [OBJ] mask  (masks context emb)
+    [  1     0     0     0     0     0  ]   # [SUBJ] mask (masks subject in context emb)  # noqa
+    [  0     0     0     1     0     0  ]   # [OBJ] mask  (masks object in context emb)   # noqa
                  |
-           [float_subj, float_obj]        # Element-wise sum over subj/obj tokens followed by a reshape  # noqa
+          [float_subj, float_obj]        # Element-wise sum over subj/obj tokens followed by concatenate  # noqa
                  |
-           Dropout + Dense
+             Dropout + Dense
 
     :param int n_classes: Number of output classes. Use 1 or 2 for binary.
     :param str bert_file: Path to tensorflow_hub compatible BERT model.
@@ -388,6 +434,9 @@ class EntityModel(BERTModel):
     :param float dropout_rate: (Default 0.2) Dropout rate for dropout layer
                                after BERT layer.
     :param float learning_rate: (Default 2e-5) The learning rate.
+    :param int random_seed: Set the tensorflow random seed.
+    :param bool bert_trainable: (Default True) Whether to allow fine-tuning
+                                of the BERT layer.
     :param tuple(np.array) validation_data: (X, y) tuple of validation data.
     :param list(str) fit_metrics: (Default ['accuracy']) List of metrics to
                                  compute during training.
@@ -407,19 +456,24 @@ class EntityModel(BERTModel):
                                   used to mask the subject and objects of
                                   a predication in the given sentence.
     """
+
+    name = "EntityModel"
+
     def __init__(self, mask_tokens=["[ARG1]", "[ARG2]"], *args, **kwargs):
         self.mask_tokens = mask_tokens
+        self.total_mask_length = 10
         print(f"Initializing {self.name}")
         super().__init__(*args, **kwargs)
-        self.name = "EntityModel"
 
     def _get_subj_obj_masks(self, tokens):
         """Returns indices in ragne(max_seq_length)
-           of [SUBJ] and [OBJ] tokens."""
+           of [SUBJ] and [OBJ] tokens. Used by
+           EntityModel.tokenize()."""
         if len(tokens) > self.max_seq_length:
             raise IndexError("Token length more than max seq length!")
         subj_toks = self.tokenizer.tokenize(self.mask_tokens[0])
         obj_toks = self.tokenizer.tokenize(self.mask_tokens[1])
+        assert len(subj_toks) + len(obj_toks) == self.total_mask_length
 
         subj_mask = np.zeros(shape=(self.max_seq_length,), dtype=int)
         obj_mask = np.zeros(shape=(self.max_seq_length,), dtype=int)
@@ -496,24 +550,23 @@ class EntityModel(BERTModel):
         bert_inputs = [input_word_ids, input_mask, segment_ids]
 
         subj_mask = tf.keras.layers.Input(shape=inshape,
-                                          dtype=tf.int32,
+                                          dtype=tf.bool,
                                           name="subject_mask")
         obj_mask = tf.keras.layers.Input(shape=inshape,
-                                         dtype=tf.int32,
+                                         dtype=tf.bool,
                                          name="object_mask")
         mask_inputs = [subj_mask, obj_mask]
 
         bert_layer = hub.KerasLayer(self.bert_file,
-                                    trainable=True, name="bert")
+                                    trainable=self.bert_trainable,
+                                    name="bert")
 
         pooled_output, seq_output = bert_layer(bert_inputs)
         # We mask the subject and object individually to control their
         # order when passed to the Dense layer.
-        subj = tf.boolean_mask(seq_output, subj_mask, axis=0, name="subj_mask")
-        obj = tf.boolean_mask(seq_output, obj_mask, axis=0, name="obj_mask")
-        dense_input = tf.stack([subj, obj], axis=1)
-        total_mask_length = 10
-        dense_input = tf.reshape(dense_input, (-1, total_mask_length*768))
+        subj = MaskReduceLayer(name="masked_subject")(seq_output, subj_mask)
+        obj = MaskReduceLayer(name="masked_object")(seq_output, obj_mask)
+        dense_input = tf.keras.layers.Concatenate()([subj, obj])
         drop_layer = tf.keras.layers.Dropout(
                 rate=self.dropout_rate, name="dropout")(dense_input)
         pred_layer = tf.keras.layers.Dense(
@@ -527,3 +580,17 @@ class EntityModel(BERTModel):
                 learning_rate=self.learning_rate, epsilon=1e-8)
         model.compile(loss=loss, optimizer=optimizer, metrics=self.fit_metrics)
         return model
+
+    def _collect_config(self):
+        config = dict(n_classes=self.n_classes,
+                      bert_file=self.bert_file,
+                      max_seq_length=self.max_seq_length,
+                      batch_size=self.batch_size,
+                      learning_rate=self.learning_rate,
+                      bert_trainable=self.bert_trainable,
+                      random_seed=self.random_seed,
+                      dropout_rate=self.dropout_rate,
+                      fit_metrics=[m.name for m in self.fit_metrics],
+                      initial_bias=list(self.initial_bias),
+                      mask_tokens=self.mask_tokens)
+        return config

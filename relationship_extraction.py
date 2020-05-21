@@ -14,9 +14,6 @@ import sys
 sys.path.append("..")
 import bert_model  # noqa: Module level import not at top of file.
 
-np.random.seed(42)
-tf.random.set_seed(42)
-
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -31,6 +28,11 @@ def parse_args():
                         choices=["pooled", "entity"],
                         help="""Which model class (from bert_models.py)
                                 to use.""")
+    parser.add_argument("--no_finetune", action="store_true", default=False,
+                        help="""If specified, don't fine-tune
+                                the BERT layer.""")
+    parser.add_argument("--random_seed", type=int, default=None,
+                        help="""Set the random seed.""")
     parser.add_argument("--mask_sentences", action="store_true", default=False,
                         help="""If True, mask subject and object mentions in
                                 each sentence with [ARG1] or [ARG2].""")
@@ -47,6 +49,10 @@ def parse_args():
 
 
 def main(args):
+    if args.random_seed is not None:
+        np.random.seed(args.random_seed)
+        tf.random.set_seed(args.random_seed)
+
     df = pd.read_csv(args.dataset)
 
     keep_idxs = list(range(df.shape[0]))
@@ -63,7 +69,7 @@ def main(args):
     binarizer = LabelBinarizer()
     y = binarizer.fit_transform(predicates)
     n_classes = len(set(predicates))
-    unique_predicates = list(set(predicates))
+    unique_predicates = sorted(set(predicates))
     print("LABELS: ", unique_predicates)
     print(binarizer.transform(unique_predicates))
 
@@ -72,13 +78,13 @@ def main(args):
 
     # 80% train, 10% validation, 10% test
     train_splitter = StratifiedShuffleSplit(n_splits=1, train_size=0.8,
-                                            random_state=42)
+                                            random_state=666)
     train_idxs, other_idxs = next(train_splitter.split(texts, y))
     train_texts, other_texts = texts[train_idxs], texts[other_idxs]
     train_y, other_y = y[train_idxs], y[other_idxs]
 
     test_splitter = StratifiedShuffleSplit(n_splits=1, train_size=0.5,
-                                           random_state=42)
+                                           random_state=666)
     val_idxs, test_idxs = next(test_splitter.split(other_texts, other_y))
     val_texts, test_texts = other_texts[val_idxs], other_texts[test_idxs]
     val_y, test_y = other_y[val_idxs], other_y[test_idxs]
@@ -96,7 +102,6 @@ def main(args):
 
     bert_class = get_bert_model_class(args.bert_model_class)
     print("Using BERT model: ", bert_class)
-    input()
 
     os.makedirs(args.outdir, exist_ok=False)
     ckpt_dir = tb_logdir = None
@@ -112,9 +117,12 @@ def main(args):
                                    f"../{bert_class.name}.json")
         bert = bert_class.from_model_checkpoint(params_file, weights_file)
     else:
+        bert_trainable = not args.no_finetune
         bert = bert_class(n_classes=n_classes, bert_file=args.bert_model_file,
                           max_seq_length=256, batch_size=16,
-                          dropout_rate=0.2, learning_rate=2e-5,
+                          dropout_rate=0.2, learning_rate=1e-5,
+                          random_seed=args.random_seed,
+                          bert_trainable=bert_trainable,
                           initial_bias=initial_bias,
                           fit_metrics=["precision", "recall"],
                           validation_data=(val_texts, val_y),
@@ -174,18 +182,17 @@ def evaluate(bert_model, df, texts, y, outdir,
     with open(predictions_outfile, 'w') as outF:
         writer = csv.writer(outF)
         writer.writerow(["PREDICATION_ID", "SENTENCE", "ARG1",
-                         "PREDICATE", "ARG2", "PREDICTED",
-                         "GOLD", "SCORES"])
+                         "GOLD_PREDICATE", "ARG2", "PREDICTED",
+                         "SCORES"])
         for (j, row) in enumerate(df.itertuples()):
             pid = row.PREDICATION_ID
             sent = row.SENTENCE
             subj = row.SUBJECT_TEXT
-            predicate = gold_labels[j]
+            gold = gold_labels[j]
             obj = row.OBJECT_TEXT
             pred = predicted_labels[j]
             score = ','.join([str(s) for s in scores[j]])
-            writer.writerow([pid, sent, subj, predicate,
-                             obj, pred, gold, score])
+            writer.writerow([pid, sent, subj, gold, obj, pred, score])
     print(f"Predictions written to {predictions_outfile}")
 
 

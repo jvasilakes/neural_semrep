@@ -34,7 +34,7 @@ def main(results_dir, plot_title=None, save=False, prediction_files=[]):
         fold_results = pd.read_csv(infile, keep_default_na=False)
         all_results = pd.concat((all_results, fold_results))
     print(f"N={all_results.shape[0]}\n")
-    n_classes = all_results["GOLD"].unique().shape[0]
+    n_classes = all_results["GOLD_PREDICATION"].unique().shape[0]
     if n_classes == 2:
         average = "binary"
     else:
