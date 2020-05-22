@@ -1,28 +1,23 @@
-import os
 import argparse
 import pandas as pd
-from sklearn.preprocessing import LabelBinarizer
 
 import utils
-import bert_model
+import bert_models
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, required=True,
                         help="""The dataset on which to run predictions.""")
-    parser.add_argument("--outdir", type=str, required=True,
+    parser.add_argument("--outfile", type=str, required=True,
                         help="""Where to save the predictions.""")
-    parser.add_argument("--dataset_name", type=str, required=True,
-                        help="""Name of the dataset. Used for saving
-                                predictions.""")
     parser.add_argument("--bert_weights_file", type=str, required=True,
                         help="""BERT weights checkpoint file.""")
     parser.add_argument("--bert_config_file", type=str, required=True,
                         help="""Config file for BERT model.""")
     parser.add_argument("--bert_model_class", type=str, required=True,
                         choices=["pooled", "entity"],
-                        help="""BERT model class from bert_model.py
+                        help="""BERT model class from bert_models.py
                                 to use.""")
     parser.add_argument("--classes", type=str, nargs='*', default=[],
                         help="""List of unique classes the BERT model was
@@ -31,10 +26,10 @@ def parse_args():
 
 
 def main(args):
-    dataset = pd.read_csv(args.dataset, index_col=0)
+    dataset = pd.read_csv(args.dataset, index_col=0, keep_default_na=False)
 
-    lookup = {"pooled": bert_model.PooledModel,
-              "entity": bert_model.EntityModel}
+    lookup = {"pooled": bert_models.PooledModel,
+              "entity": bert_models.EntityModel}
     bert_class = lookup[args.bert_model_class]
 
     bert = bert_class.from_model_checkpoint(
@@ -47,23 +42,15 @@ def main(args):
     else:
         unique_classes = sorted(set(dataset["PREDICATE"].values))
 
-    binarizer = LabelBinarizer()
-    binarized_classes = binarizer.fit_transform(unique_classes)
+    y = utils.get_onehot_from_labels(dataset["PREDICATE_LABEL"])
 
-    for (predicate, binarized) in zip(unique_classes, binarized_classes):
-        print(f"{predicate:<16}: {binarized}")
+    assert dataset.shape[0] == y.shape[0]
 
-    dataset_masked = utils.mask_dataset(dataset)
-    dataset_masked.loc[:, "SENTENCE"] = dataset_masked["SENTENCE"].apply(
-            lambda s: s + " [SEP]")
-
-    predicates = dataset_masked["PREDICATE"].values
-    y = binarizer.transform(predicates)
-    assert dataset_masked.shape[0] == y.shape[0]
-
-    os.makedirs(args.outdir, exist_ok=True)
-    utils.evaluate(bert, dataset_masked, args.outdir, binarizer,
-                   name=args.dataset_name, header=True)
+    labels2preds = {i: lab for (i, lab) in enumerate(unique_classes)}
+    print(labels2preds)
+    docs = dataset["SENTENCE"].values
+    scores = bert.predict(docs, predict_classes=False).numpy()
+    utils.save_predictions(dataset, scores, args.outfile, labels2preds)
 
 
 if __name__ == "__main__":

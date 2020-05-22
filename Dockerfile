@@ -12,4 +12,5 @@ COPY bert_models.py bert_models.py
 COPY bert_tokenization.py bert_tokenization.py
 COPY utils.py utils.py
 COPY relationship_classification.py relationship_classification.py
+COPY run_prediction.py run_prediction.py
 COPY experiment_scripts/ ./experiment_scripts/

@@ -52,7 +52,9 @@ class MaskReduceLayer(tf.keras.layers.Layer):
             masked = inputs
         else:
             masked = tf.ragged.boolean_mask(inputs, mask)
-        return tf.reduce_sum(masked, axis=1)
+        # return tf.reduce_sum(masked, axis=1)
+        # return sqrtn(masked, axis=1)  # TODO: Implement this.
+        return tf.reduce_mean(masked, axis=1)
 
 
 class BERTModel(object):
@@ -114,7 +116,8 @@ class BERTModel(object):
             self._callbacks.append(tb_cb)
             if isinstance(self.learning_rate,
                           tf.keras.optimizers.schedules.LearningRateSchedule):
-                lr_log_callback = self._get_learning_rate_log_callback(tensorboard_logdir)
+                lr_log_callback = self._get_learning_rate_log_callback(
+                        tensorboard_logdir)
                 self._callbacks.append(lr_log_callback)
         self.model = self.get_model()
         self.tokenizer = self.get_tokenizer()
@@ -201,7 +204,7 @@ class BERTModel(object):
         fname = "weights.{epoch:02d}-{loss:.2f}.hdf5"
         filepath = os.path.join(checkpoint_dir, fname)
         return tf.keras.callbacks.ModelCheckpoint(filepath=filepath,
-                                                  monitor="loss",
+                                                  monitor="val_loss",
                                                   save_weights_only=True,
                                                   verbose=1)
 

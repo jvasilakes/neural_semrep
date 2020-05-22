@@ -13,6 +13,10 @@ def parse_args():
     parser.add_argument("--dataset", type=str, required=True)
     parser.add_argument("--outdir", type=str, required=True)
     parser.add_argument("--random_seed", type=int, required=True)
+    parser.add_argument("--keep_labels", type=str, nargs='*',
+                        help="""Keep only examples with these labels.""")
+    parser.add_argument("--no_split", action="store_true", default=False,
+                        help="""Don't split dataset into train/val/test.""")
     return parser.parse_args()
 
 
@@ -20,6 +24,10 @@ def main(args):
     np.random.seed(args.random_seed)
 
     dataset = pd.read_csv(args.dataset, index_col=0)
+    if args.keep_labels != []:
+        print(dataset["PREDICATE"].unique())
+        dataset = dataset[dataset["PREDICATE"].isin(args.keep_labels)]
+        print(dataset["PREDICATE"].unique())
 
     # Change incorrect predications to have predicte NULL
     dataset.loc[:, "PREDICATE"] = np.where(dataset["LABEL"] == 'n',  # if
@@ -36,7 +44,10 @@ def main(args):
 
     # Binarize the labels
     predicates = dataset_masked["PREDICATE"].values
-    unique_classes = sorted(set(predicates))
+    if args.keep_labels != []:
+        unique_classes = sorted(set(args.keep_labels))
+    else:
+        unique_classes = sorted(set(predicates))
     binarizer = LabelBinarizer()
     binarized_classes = binarizer.fit_transform(unique_classes)
     for (predicate, binarized) in zip(unique_classes, binarized_classes):
@@ -52,6 +63,13 @@ def main(args):
     # Keep only the relevant columns, plus the Index (PREDICATION_ID)
     keep_cols = ["SENTENCE", "PREDICATE", "PREDICATE_LABEL"]
     dataset_masked = dataset_masked[keep_cols]
+
+    if args.no_split is True:
+        dataset_name = os.path.basename(args.dataset)
+        outfile = os.path.join(args.outdir, dataset_name)
+        dataset_masked.to_csv(outfile, header=True, index=True,
+                              index_label="PREDICATION_ID")
+        return
 
     # Split into train, validation, and test
     train_df, other_df, train_y, other_y = train_test_split(
