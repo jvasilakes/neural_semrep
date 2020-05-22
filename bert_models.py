@@ -60,7 +60,7 @@ class BERTModel(object):
     The generic BERT-based model. Subclass to implement
     your chosen architecture.
     :param int n_classes: Number of output classes. Use 1 or 2 for binary.
-    :param str bert_file: Path to tensorflow_hub compatible BERT model.
+    :param str bert_model_file: Path to tensorflow_hub compatible BERT model.
     :param int max_seq_length: (Default 128) Maximum input sequence length.
     :param int batch_size: (Default 16) Batch size.
     :param float dropout_rate: (Default 0.2) Dropout rate for dropout layer
@@ -72,49 +72,49 @@ class BERTModel(object):
     :param tuple(np.array) validation_data: (X, y) tuple of validation data.
     :param list(str) fit_metrics: (Default ['accuracy']) List of metrics to
                                  compute during training.
-    :param np.array(float) initial_bias: (Default None) If None, use 'zeros'.
+    :param np.array(float) initial_biases: (Default None) If None, use 'zeros'.
                                          Otherwise, initialize with the given
                                          constant values.
     :param str checkpoint_dir: (Default None) Path to directory in which to
                                save model checkpoints. Creates it if it
                                doesn't exist. If None, don't save checkpoints.
-    :param str logdir: (Default None) Path to directory in which to
+    :param str tensorboard_logdir: (Default None) Path to directory in which to
                                save tensorboard logs. Creates it if it
                                doesn't exist. If None, don't save logs.
     """
 
     name = "BERTModel"
 
-    def __init__(self, n_classes, bert_file, max_seq_length=128,
+    def __init__(self, n_classes, bert_model_file, max_seq_length=128,
                  batch_size=16, dropout_rate=0.2, learning_rate=2e-5,
                  random_seed=None, bert_trainable=True, validation_data=None,
-                 fit_metrics=["accuracy"], initial_bias=None,
-                 checkpoint_dir=None, logdir=None):
+                 fit_metrics=["accuracy"], initial_biases=None,
+                 checkpoint_dir=None, tensorboard_logdir=None):
         if random_seed is not None:
             self.random_seed = random_seed
             tf.random.set_seed(random_seed)
         self.n_classes = n_classes
-        self.bert_file = bert_file
+        self.bert_model_file = bert_model_file
         self.max_seq_length = max_seq_length
         self.batch_size = batch_size
         self.dropout_rate = dropout_rate
         self.learning_rate = self._get_learning_rate(learning_rate)
         self.bert_trainable = bert_trainable
         self.fit_metrics = self._get_metrics(fit_metrics)
-        self.initial_bias = initial_bias
+        self.initial_biases = initial_biases
         self.bias_initializer = self._get_bias_initializer()
         self._callbacks = []
         if checkpoint_dir is not None:
             print("Writing model checkpoints to: ", checkpoint_dir)
             ckpnt_cb = self._get_checkpoint_callback(checkpoint_dir)
             self._callbacks.append(ckpnt_cb)
-        if logdir is not None:
-            print("Writing Tensorboard logs to: ", logdir)
-            tb_cb = self._get_tensorboard_callback(logdir)
+        if tensorboard_logdir is not None:
+            print("Writing Tensorboard logs to: ", tensorboard_logdir)
+            tb_cb = self._get_tensorboard_callback(tensorboard_logdir)
             self._callbacks.append(tb_cb)
             if isinstance(self.learning_rate,
                           tf.keras.optimizers.schedules.LearningRateSchedule):
-                lr_log_callback = self._get_learning_rate_log_callback(logdir)
+                lr_log_callback = self._get_learning_rate_log_callback(tensorboard_logdir)
                 self._callbacks.append(lr_log_callback)
         self.model = self.get_model()
         self.tokenizer = self.get_tokenizer()
@@ -138,9 +138,9 @@ class BERTModel(object):
         raise NotImplementedError
 
     @classmethod
-    def from_model_checkpoint(cls, params_file, weights_file):
-        params = json.load(open(params_file))
-        bert_model = cls(**params)
+    def from_model_checkpoint(cls, config_file, weights_file):
+        config = json.load(open(config_file))
+        bert_model = cls(**config)
         bert_model.model.load_weights(weights_file)
         return bert_model
 
@@ -161,9 +161,9 @@ class BERTModel(object):
             return float(learning_rate)
 
     def _get_bias_initializer(self):
-        if self.initial_bias is None:
+        if self.initial_biases is None:
             return "zeros"
-        return tf.keras.initializers.Constant(self.initial_bias)
+        return tf.keras.initializers.Constant(self.initial_biases)
 
     def _get_metrics(self, metrics):
         metric_fns = []
@@ -180,7 +180,7 @@ class BERTModel(object):
 
     def _collect_config(self):
         config = dict(n_classes=self.n_classes,
-                      bert_file=self.bert_file,
+                      bert_model_file=self.bert_model_file,
                       max_seq_length=self.max_seq_length,
                       batch_size=self.batch_size,
                       learning_rate=self.learning_rate,
@@ -188,10 +188,10 @@ class BERTModel(object):
                       random_seed=self.random_seed,
                       dropout_rate=self.dropout_rate,
                       fit_metrics=[m.name for m in self.fit_metrics],
-                      initial_bias=list(self.initial_bias))
+                      initial_biases=list(self.initial_biases))
         return config
 
-    def save_params(self, outfile):
+    def save_config(self, outfile):
         if self.config is None:
             raise ValueError("Config not defined yet. Please run __init__")
         with open(outfile, 'w') as outF:
@@ -205,14 +205,14 @@ class BERTModel(object):
                                                   save_weights_only=True,
                                                   verbose=1)
 
-    def _get_tensorboard_callback(self, logdir):
+    def _get_tensorboard_callback(self, tensorboard_logdir):
         tb_cb = tf.keras.callbacks.TensorBoard(
-            log_dir=logdir, update_freq="batch",
+            log_dir=tensorboard_logdir, update_freq="batch",
             write_graph=True, write_images=True)
         return tb_cb
 
-    def _get_learning_rate_log_callback(self, logdir):
-        lr_cb = LearningRateLogCallback(logdir)
+    def _get_learning_rate_log_callback(self, tensorboard_logdir):
+        lr_cb = LearningRateLogCallback(tensorboard_logdir)
         return lr_cb
 
     def _prep_validation_data(self, validation_data):
@@ -275,12 +275,12 @@ class BERTModel(object):
                                    verbose=0)
         return loss
 
-    def fit(self, documents, labels, epochs=1, **tokenize_kwargs):
+    def fit(self, documents, labels, epochs=1, verbose=1, **tokenize_kwargs):
         processed_documents = self.tokenize(documents, **tokenize_kwargs)
         self.train_history = self.model.fit(
                 processed_documents, labels, batch_size=self.batch_size,
                 epochs=epochs, validation_data=self.validation_data,
-                callbacks=self._callbacks, verbose=2)
+                callbacks=self._callbacks, verbose=verbose)
 
     def predict(self, documents, predict_classes=True, **tokenize_kwargs):
         processed_documents = self.tokenize(documents, **tokenize_kwargs)
@@ -310,7 +310,7 @@ class PooledModel(BERTModel):
     BERT pooled output -> dropout -> dense
 
     :param int n_classes: Number of output classes. Use 1 or 2 for binary.
-    :param str bert_file: Path to tensorflow_hub compatible BERT model.
+    :param str bert_model_file: Path to tensorflow_hub compatible BERT model.
     :param int max_seq_length: (Default 128) Maximum input sequence length.
     :param int batch_size: (Default 16) Batch size.
     :param float dropout_rate: (Default 0.2) Dropout rate for dropout layer
@@ -322,13 +322,13 @@ class PooledModel(BERTModel):
     :param tuple(np.array) validation_data: (X, y) tuple of validation data.
     :param list(str) fit_metrics: (Default ['accuracy']) List of metrics to
                                  compute during training.
-    :param np.array(float) initial_bias: (Default None) If None, use 'zeros'.
+    :param np.array(float) initial_biases: (Default None) If None, use 'zeros'.
                                          Otherwise, initialize with the given
                                          constant values.
     :param str checkpoint_dir: (Default None) Path to directory in which to
                                save model checkpoints. Creates it if it
                                doesn't exist. If None, don't save checkpoints.
-    :param str logdir: (Default None) Path to directory in which to
+    :param str tensorboard_logdir: (Default None) Path to directory in which to
                                save tensorboard logs. Creates it if it
                                doesn't exist. If None, don't save logs.
     """
@@ -386,7 +386,7 @@ class PooledModel(BERTModel):
                                             name="segment_ids")
         bert_inputs = [input_word_ids, input_mask, segment_ids]
 
-        bert_layer = hub.KerasLayer(self.bert_file,
+        bert_layer = hub.KerasLayer(self.bert_model_file,
                                     trainable=self.bert_trainable,
                                     name="bert")
 
@@ -428,7 +428,7 @@ class EntityModel(BERTModel):
              Dropout + Dense
 
     :param int n_classes: Number of output classes. Use 1 or 2 for binary.
-    :param str bert_file: Path to tensorflow_hub compatible BERT model.
+    :param str bert_model_file: Path to tensorflow_hub compatible BERT model.
     :param int max_seq_length: (Default 128) Maximum input sequence length.
     :param int batch_size: (Default 16) Batch size.
     :param float dropout_rate: (Default 0.2) Dropout rate for dropout layer
@@ -440,13 +440,13 @@ class EntityModel(BERTModel):
     :param tuple(np.array) validation_data: (X, y) tuple of validation data.
     :param list(str) fit_metrics: (Default ['accuracy']) List of metrics to
                                  compute during training.
-    :param np.array(float) initial_bias: (Default None) If None, use 'zeros'.
+    :param np.array(float) initial_biases: (Default None) If None, use 'zeros'.
                                          Otherwise, initialize with the given
                                          constant values.
     :param str checkpoint_dir: (Default None) Path to directory in which to
                                save model checkpoints. Creates it if it
                                doesn't exist. If None, don't save checkpoints.
-    :param str logdir: (Default None) Path to directory in which to
+    :param str tensorboard_logdir: (Default None) Path to directory in which to
                                save tensorboard logs. Creates it if it
                                doesn't exist. If None, don't save logs.
     :param list(str) mask_tokens: (Default ['[ARG1]', '[ARG2]']) DANGER!
@@ -557,7 +557,7 @@ class EntityModel(BERTModel):
                                          name="object_mask")
         mask_inputs = [subj_mask, obj_mask]
 
-        bert_layer = hub.KerasLayer(self.bert_file,
+        bert_layer = hub.KerasLayer(self.bert_model_file,
                                     trainable=self.bert_trainable,
                                     name="bert")
 
@@ -583,7 +583,7 @@ class EntityModel(BERTModel):
 
     def _collect_config(self):
         config = dict(n_classes=self.n_classes,
-                      bert_file=self.bert_file,
+                      bert_model_file=self.bert_model_file,
                       max_seq_length=self.max_seq_length,
                       batch_size=self.batch_size,
                       learning_rate=self.learning_rate,
@@ -591,6 +591,6 @@ class EntityModel(BERTModel):
                       random_seed=self.random_seed,
                       dropout_rate=self.dropout_rate,
                       fit_metrics=[m.name for m in self.fit_metrics],
-                      initial_bias=list(self.initial_bias),
+                      initial_biases=list(self.initial_biases),
                       mask_tokens=self.mask_tokens)
         return config

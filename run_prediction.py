@@ -22,7 +22,7 @@ def parse_args():
                         help="""Config file for BERT model.""")
     parser.add_argument("--bert_model_class", type=str, required=True,
                         choices=["pooled", "entity"],
-                        help="""BERT model class from bert_models.py
+                        help="""BERT model class from bert_model.py
                                 to use.""")
     parser.add_argument("--classes", type=str, nargs='*', default=[],
                         help="""List of unique classes the BERT model was
@@ -33,8 +33,8 @@ def parse_args():
 def main(args):
     dataset = pd.read_csv(args.dataset, index_col=0)
 
-    lookup = {"pooled": bert_models.PooledModel,
-              "entity": bert_models.EntityModel}
+    lookup = {"pooled": bert_model.PooledModel,
+              "entity": bert_model.EntityModel}
     bert_class = lookup[args.bert_model_class]
 
     bert = bert_class.from_model_checkpoint(
@@ -52,14 +52,11 @@ def main(args):
 
     for (predicate, binarized) in zip(unique_classes, binarized_classes):
         print(f"{predicate:<16}: {binarized}")
-    input()
 
     dataset_masked = utils.mask_dataset(dataset)
-    print(dataset_masked.iloc[0]["SENTENCE"])
     dataset_masked.loc[:, "SENTENCE"] = dataset_masked["SENTENCE"].apply(
             lambda s: s + " [SEP]")
-    print(dataset_masked.iloc[0]["SENTENCE"])
-    input()
+
     predicates = dataset_masked["PREDICATE"].values
     y = binarizer.transform(predicates)
     assert dataset_masked.shape[0] == y.shape[0]

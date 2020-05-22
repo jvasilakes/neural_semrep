@@ -1,4 +1,4 @@
-FROM tensorflow/tensorflow:latest-gpu-py3
+FROM tensorflow/tensorflow:nightly-gpu-py3
 
 WORKDIR /usr/src/app
 RUN apt-get update --yes && \
@@ -8,8 +8,8 @@ RUN pip install --upgrade pip && \
 	pip install --no-cache-dir -r requirements.txt
 
 COPY data/ ./data/
-COPY bert_model.py  bert_model.py
+COPY bert_models.py bert_models.py
 COPY bert_tokenization.py bert_tokenization.py
-COPY predication_filter.py predication_filter.py
-COPY relationship_extraction.py relationship_extraction.py
+COPY utils.py utils.py
+COPY relationship_classification.py relationship_classification.py
 COPY experiment_scripts/ ./experiment_scripts/
