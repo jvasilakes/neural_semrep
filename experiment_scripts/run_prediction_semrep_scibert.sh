@@ -1,8 +1,8 @@
 # ==============
-# BERT Base
+# SciBERT Basevocab
 # ==============
 # 5 runs with different random seeds: 0, 10, 20, 30, 40
-model=bert
+model=scibert
 dataset=data/semrep_gold_standard/adjudicated.csv
 epoch=4
 prediction_outfile=predictions_semrep.csv
