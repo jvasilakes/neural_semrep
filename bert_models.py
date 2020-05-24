@@ -201,7 +201,7 @@ class BERTModel(object):
             json.dump(self.config, outF)
 
     def _get_checkpoint_callback(self, checkpoint_dir):
-        fname = "weights.{epoch:02d}-{loss:.2f}.hdf5"
+        fname = "weights.{epoch:02d}-{val_loss:.2f}.hdf5"
         filepath = os.path.join(checkpoint_dir, fname)
         return tf.keras.callbacks.ModelCheckpoint(filepath=filepath,
                                                   monitor="val_loss",
